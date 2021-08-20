@@ -12,13 +12,13 @@ mod texture;
 use camera::{Camera, CameraController};
 
 #[cfg(target_os = "windows")]
-const BACKEND: wgpu::BackendBit = wgpu::BackendBit::DX12;
+const BACKEND: wgpu::Backends = wgpu::Backends::DX12;
 
 #[cfg(target_os = "macos")]
-const BACKEND: wgpu::BackendBit = wgpu::BackendBit::METAL;
+const BACKEND: wgpu::Backends = wgpu::Backends::METAL;
 
 #[cfg(target_os = "linux")]
-const BACKEND: wgpu::BackendBit = wgpu::BackendBit::VULKAN;
+const BACKEND: wgpu::Backends = wgpu::Backends::VULKAN;
 
 struct Instance {
     position: cgmath::Vector3<f32>,
@@ -49,7 +49,7 @@ impl InstanceRaw {
             // We need to switch from using a step mode of Vertex to Instance
             // This means that our shaders will only change to use the next
             // instance when the shader starts processing a new instance
-            step_mode: wgpu::InputStepMode::Instance,
+            step_mode: wgpu::VertexStepMode::Instance,
             attributes: &[
                 wgpu::VertexAttribute {
                     offset: 0,
@@ -92,7 +92,7 @@ impl Vertex {
     fn descriptor<'a>() -> wgpu::VertexBufferLayout<'a> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::InputStepMode::Vertex,
+            step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
                 wgpu::VertexAttribute {
                     offset: 0,
@@ -169,8 +169,6 @@ struct State {
     surface: wgpu::Surface,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    sc_desc: wgpu::SwapChainDescriptor,
-    swap_chain: wgpu::SwapChain,
     size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
@@ -183,6 +181,7 @@ struct State {
     depth_texture: texture::Texture,
     camera: Camera,
     camera_controller: CameraController,
+    config: wgpu::SurfaceConfiguration,
 }
 
 impl State {
@@ -214,15 +213,17 @@ impl State {
             .await
             .unwrap();
 
-        let sc_desc = wgpu::SwapChainDescriptor {
-            usage: wgpu::TextureUsage::RENDER_ATTACHMENT,
-            format: adapter.get_swap_chain_preferred_format(&surface).unwrap(),
+        let swapchain_format = surface.get_preferred_format(&adapter).unwrap();
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: swapchain_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: wgpu::PresentMode::Mailbox,
         };
 
-        let swap_chain = device.create_swap_chain(&surface, &sc_desc);
+        surface.configure(&device, &config);
 
         // Create a texture
         let diffuse_bytes = include_bytes!("tree.png");
@@ -234,7 +235,7 @@ impl State {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             multisampled: false,
                             view_dimension: wgpu::TextureViewDimension::D2,
@@ -244,7 +245,7 @@ impl State {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler {
                             // This is only for TextureSampleType::Depth
                             comparison: false,
@@ -276,8 +277,12 @@ impl State {
 
         // Create a depth texture
 
-        let depth_texture =
-            texture::Texture::create_depth_texture(&device, &sc_desc, "depth_texture");
+        let depth_texture = texture::Texture::create_depth_texture(
+            &device,
+            size.width,
+            size.height,
+            "depth_texture",
+        );
 
         // Create a camera
 
@@ -289,7 +294,7 @@ impl State {
             target: (0.0, 0.0, 0.0).into(),
             // which way is "up"
             up: cgmath::Vector3::unit_y(),
-            aspect: sc_desc.width as f32 / sc_desc.height as f32,
+            aspect: size.width as f32 / size.height as f32,
             fovy: 45.0,
             znear: 0.1,
             zfar: 100.0,
@@ -305,14 +310,14 @@ impl State {
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Uniform Buffer"),
             contents: bytemuck::cast_slice(&[uniforms]),
-            usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
         let uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStage::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -336,7 +341,6 @@ impl State {
 
         let shader = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            flags: wgpu::ShaderFlags::all(),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
@@ -361,9 +365,9 @@ impl State {
                 module: &shader,
                 entry_point: "main",
                 targets: &[wgpu::ColorTargetState {
-                    format: sc_desc.format,
+                    format: swapchain_format,
                     blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrite::ALL,
+                    write_mask: wgpu::ColorWrites::ALL,
                 }],
             }),
             primitive: wgpu::PrimitiveState {
@@ -394,7 +398,7 @@ impl State {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsage::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX,
         });
 
         // Create index buffer
@@ -402,7 +406,7 @@ impl State {
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Index Buffer"),
             contents: bytemuck::cast_slice(INDICES),
-            usage: wgpu::BufferUsage::INDEX,
+            usage: wgpu::BufferUsages::INDEX,
         });
 
         let instances = (0..NUM_INSTANCES_PER_ROW)
@@ -434,7 +438,7 @@ impl State {
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Instance Buffer"),
             contents: bytemuck::cast_slice(&instance_data),
-            usage: wgpu::BufferUsage::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX,
         });
 
         Self {
@@ -443,8 +447,6 @@ impl State {
             surface,
             device,
             queue,
-            sc_desc,
-            swap_chain,
             size,
             render_pipeline,
             vertex_buffer,
@@ -457,18 +459,20 @@ impl State {
             depth_texture,
             camera,
             camera_controller,
+            config,
         }
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
-            self.sc_desc.width = new_size.width;
-            self.sc_desc.height = new_size.height;
-            self.swap_chain = self.device.create_swap_chain(&self.surface, &self.sc_desc);
+            self.config.width = new_size.width;
+            self.config.height = new_size.height;
+            self.surface.configure(&self.device, &self.config);
             self.depth_texture = texture::Texture::create_depth_texture(
                 &self.device,
-                &self.sc_desc,
+                new_size.width,
+                new_size.height,
                 "depth_texture",
             );
         }
@@ -488,8 +492,12 @@ impl State {
         )
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SwapChainError> {
-        let frame = self.swap_chain.get_current_frame()?.output;
+    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let frame = self.surface.get_current_frame()?.output;
+
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         // An encoder is needed to create the actual commands to send to the gpu
         // This builds a command buffer that we can send to gpu
@@ -504,7 +512,7 @@ impl State {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[wgpu::RenderPassColorAttachment {
-                    view: &frame.view,
+                    view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -561,9 +569,9 @@ fn main() {
             match state.render() {
                 Ok(_) => {}
                 // Recreate the swapchain if lost
-                Err(wgpu::SwapChainError::Lost) => state.resize(state.size),
+                Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
                 // The system is out of memory, we should probably quit
-                Err(wgpu::SwapChainError::OutOfMemory) => *control_flow = ControlFlow::Exit,
+                Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
                 // All other errors should be resolved by the next frame
                 Err(e) => eprintln!("{:?}", e),
             }
