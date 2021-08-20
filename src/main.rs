@@ -4,6 +4,15 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+#[cfg(target_os = "windows")]
+const BACKEND: wgpu::BackendBit = wgpu::BackendBit::DX12;
+
+#[cfg(target_os = "macos")]
+const BACKEND: wgpu::BackendBit = wgpu::BackendBit::METAL;
+
+#[cfg(target_os = "linux")]
+const BACKEND: wgpu::BackendBit = wgpu::BackendBit::VULKAN;
+
 struct State {
     surface: wgpu::Surface,
     device: wgpu::Device,
@@ -11,6 +20,7 @@ struct State {
     sc_desc: wgpu::SwapChainDescriptor,
     swap_chain: wgpu::SwapChain,
     size: winit::dpi::PhysicalSize<u32>,
+    render_pipeline: wgpu::RenderPipeline,
 }
 
 impl State {
@@ -18,18 +28,9 @@ impl State {
     async fn new(window: &Window) -> Self {
         let size = window.inner_size();
 
-        #[cfg(target_os = "windows")]
-        let backend = wgpu::BackendBit::DX12;
-
-        #[cfg(target_os = "macos")]
-        let backend = wgpu::BackendBit::METAL;
-
-        #[cfg(target_os = "linux")]
-        let backend = wgpu::BackendBit::VULKAN;
-
         // The instance is a handle to our GPU
         // BackendBit::PRIMARY => Vulkan + Metal + DX12 + Browser WebGPU
-        let instance = wgpu::Instance::new(backend);
+        let instance = wgpu::Instance::new(BACKEND);
         let surface = unsafe { instance.create_surface(window) };
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -61,6 +62,53 @@ impl State {
 
         let swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
+        let shader = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+            label: Some("Shader"),
+            flags: wgpu::ShaderFlags::all(),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[],
+                push_constant_ranges: &[],
+            });
+
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "main",
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "main",
+                targets: &[wgpu::ColorTargetState {
+                    format: sc_desc.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrite::ALL,
+                }],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                clamp_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+        });
+
         Self {
             surface,
             device,
@@ -68,6 +116,7 @@ impl State {
             sc_desc,
             swap_chain,
             size,
+            render_pipeline,
         }
     }
 
@@ -99,7 +148,7 @@ impl State {
 
         {
             // Record a render pass
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[wgpu::RenderPassColorAttachment {
                     view: &frame.view,
@@ -116,6 +165,9 @@ impl State {
                 }],
                 depth_stencil_attachment: None,
             });
+
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.draw(0..3, 0..1);
         }
 
         // submit will accept anything that implements IntoIter
